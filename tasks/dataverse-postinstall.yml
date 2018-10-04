@@ -1,0 +1,61 @@
+---
+# dataverse/tasks/dataverse-postinstall.yml
+
+#- name: restart solr
+#  service: name=solr state=restarted
+# 20180905jmj: before glassfish is stopped, add the jvm option dataverse.siteUrl
+# in the dataverse installer glassfish-setup.sh
+# ./asadmin $ASADMIN_OPTS create-jvm-options "\-Ddataverse.fqdn=${HOST_ADDRESS}"
+
+- name: add jvm option siteURL
+  become: yes
+  become_user: "{{ dataverse.glassfish.user }}"
+  command: nohup {{ dataverse.glassfish.root }}/bin/asadmin create-jvm-options '-Ddataverse\.siteUrl=http\://${dataverse.fqdn}\:8080'
+
+- name: stop glassfish manually (systemd gums up the works)
+  become: yes
+  become_user: "{{ dataverse.glassfish.user }}"
+  shell: nohup {{ dataverse.glassfish.root }}/bin/asadmin stop-domain {{ dataverse.glassfish.domain }} || true
+
+- name: start glassfish with systemd
+  service: name=glassfish state=restarted
+
+- name: wait for glassfish to become ready
+  wait_for:
+    port: 8009
+    state: present
+    timeout: "{{ dataverse.glassfish.timeout }}"
+
+- name: setup-all.sh kitchen sink configuration.
+  shell: "cd /tmp/dvinstall && ./setup-all.sh > /tmp/setup-all.out 2>&1"
+
+- name: populate reference data
+  shell: "psql -U {{ dataverse.dbuser }} -h {{ dataverse.dbhost }} -d {{ dataverse.db }} -f /tmp/dvinstall/reference_data.sql"
+  environment:
+    PGPASSWORD: "{{ dataverse.dbpass }}"
+
+- name: suppress grizzly ajp warnings
+  become: yes
+  become_user: "{{ dataverse.glassfish.user }}"
+  shell: "{{ dataverse.glassfish.root }}/bin/asadmin set-log-levels org.glassfish.grizzly.http.server.util.RequestUtils=SEVERE"
+
+- name: override some default settings
+  become: yes
+  become_user: "{{ dataverse.glassfish.user }}"
+  shell: 'curl -X PUT -d "{{item.val}}" "{{ dataverse.api.location }}/admin/settings/{{item.prop}}"'
+  with_items:
+    - { prop: ":GoogleAnalyticsCode", val: "{{ dataverse.google_analytics_key }}", desc: "key for Google Analytics"}
+    - { prop: ":FooterCopyright" , val: "{{ dataverse.copyright }}", desc: "addition to the default copyright statement"}
+    - { prop: ":SystemEmail", val: "{{ dataverse.service_email }}", desc: "instance email address"}
+    - { prop: ":Protocol", val: "{{ dataverse.doi.protocol }}", desc: "global identifier protocol"}
+    - { prop: ":DoiProvider", val: "{{ dataverse.doi.provider }}", desc: "DOI service provider (EZID or DataCite)"}
+    - { prop: ":Authority", val: "{{ dataverse.doi.authority }}", desc: "DOI prefix"}
+    - { prop: ":Shoulder,", val: "/", desc: "DOI shoulder. leave as slash (/)"}
+    - { prop: ":ShibEnabled", val: "{{ dataverse.shibboleth.enabled }}", desc: "enable/disable shibboleth" }
+    - { prop: ":AllowSignUp", val: "{{ dataverse.allow_signups }}", desc: "don't allow self-signup"}
+    - { prop: ":BlockedApiEndpoints", val: "admin,test", desc: "APIs that are controlled"}
+    - { prop: ":BlockedApiPolicy", val: "localhost-only", desc: "control API access"}
+
+- name: Fin
+  debug: msg="Dataverse installation complete! Please check output logs in /tmp for further review."
+
